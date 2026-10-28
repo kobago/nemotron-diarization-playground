@@ -86,7 +86,31 @@ uv run compare.py out/cpp.json data/nasa.who.json
 - 1 チャンクの計算は約 60 ms で、PyTorch (MPS) の約 130 ms の半分。0.32 s バッファでもリアルタイムの 3.9 倍の余裕がある。
 - 新しい設定での初回実行は、Metal の準備で 20 秒ほど余計にかかった (`bench` のウォームアップがこれを吸収している)。
 
+## Web アプリ (マイク → 話者付き文字起こし)
+
+`metal-server` プリセットをビルドしてから起動する。`nemo-speech serve` (Nemotron 3.5 ASR + Nemotron 3 Diarization, Metal) を立ち上げ、ブラウザのマイク音声をその realtime WebSocket に流す。音声は端末の外に出ない。
+
+```sh
+cd vendor/NeMo-Speech.cpp && git submodule update --init --depth 1 third_party/cpp-httplib
+scripts/configure.sh metal-server && cmake --build --preset metal-server && cd ../..
+uv run webapp.py   # http://localhost:5174
+```
+
+- 日本語 / English を選べる。無音 (300 / 600 / 1000 ms) で発話が区切られるたびに、話者付きの 1 行が確定する。
+- `serve` はエンドポインティングが既定で無効なので、`webapp.py` が `--asr.endpointing.enable=true` を付けている。無効のままだと、クライアントが commit するまで 1 行も確定しない。
+- 日本語は単語の区切りがなく、ASR の「単語」が句読点間の塊になる。1 行の話者は、その行で一番長く話した話者にしている。
+
+ブラウザと同じプロトコルで WAV を実時間で流した結果 (M1, Metal):
+
+| 音声 | 区切り | 発話終了 → 確定 | 話者 | サーバー RSS |
+|---|---:|---:|---|---:|
+| NASA 2 分 (英語, 3 人) | 600 ms | 中央値 0.70 s, 最大 0.80 s | ホスト・クリップ・ゲストを区別 | 410–460 MB |
+| `make_sample_ja.sh` 47 秒 (日本語, `say` の 3 声) | 300 ms | 0.3–0.9 s | 認識できた行はすべて正しい話者 | 約 445 MB |
+
+- 4 倍速で流すと確定までの時間が伸び続けた (10 秒超)。実時間の数倍までしか余裕はない。
+- 日本語の合成音声 (Rocko, Shelley) は発話ごと認識されないことがあった。「話者」は「和社」になった。
+
 ## 未検証
 
-- マイク入力 (`nemo-speech transcribe --live --diarize`) での実際の遅延とメモリ
+- 実際のマイク入力 (人の声) での認識精度と遅延
 - 日本語音声、4 人以上の会話、正解ラベル付きデータでの DER

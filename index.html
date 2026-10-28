@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nemotron ライブ話者認識</title>
+<style>
+  :root { --bg: #f7f7f5; --fg: #1b1b1b; --muted: #6b6b6b; --card: #fff; --line: #e2e2de; --accent: #4a8a1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #131313; --fg: #ececec; --muted: #9a9a9a; --card: #1d1d1d; --line: #323232; --accent: #76b900; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.6 system-ui, -apple-system, "Hiragino Sans", sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 28px 0 8px; color: var(--muted); font-weight: 600; }
+  .sub, .note { color: var(--muted); font-size: 13px; margin: 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 16px 0 4px; }
+  button { font: inherit; font-weight: 600; padding: 10px 22px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; }
+  button.on { background: #d64545; }
+  select { font: inherit; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .stat span { display: block; font-size: 12px; color: var(--muted); }
+  .stat b { font-size: 20px; font-variant-numeric: tabular-nums; }
+  .row { display: flex; align-items: center; gap: 10px; height: 26px; }
+  .row .lab { width: 56px; font-size: 13px; font-weight: 600; flex: none; }
+  .lane { position: relative; flex: 1; height: 14px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .lane i { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+  .list { padding: 4px 12px; max-height: 420px; overflow-y: auto; }
+  .list p { margin: 8px 0; display: flex; gap: 8px; align-items: baseline; }
+  .chip { color: #fff; font-size: 12px; padding: 1px 8px; border-radius: 99px; flex: none; }
+  .t { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
+  .partial { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Nemotron ライブ話者認識</h1>
+  <p class="sub">マイクの音声をローカルの NeMo-Speech.cpp (Metal) に流し、Nemotron 3.5 ASR で文字起こし、Nemotron 3 Diarization で話者を付けます。音声は端末の外に出ません。無音で発話が区切られるたびに、話者付きの1行が確定します。</p>
+
+  <div class="controls">
+    <button id="start">録音開始</button>
+    <label>言語
+      <select id="lang">
+        <option value="ja-JP">日本語</option>
+        <option value="en-US">English</option>
+      </select>
+    </label>
+    <label>区切りの無音
+      <select id="ep">
+        <option value="300">300 ms</option>
+        <option value="600" selected>600 ms</option>
+        <option value="1000">1000 ms</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="aec"> エコーキャンセル</label>
+  </div>
+  <p class="note">言語と区切りの無音は録音開始時に決まります。区切りが短いほど早く確定しますが、文の途中で切れやすくなります。エコーキャンセル: AI との会話ではオン、スピーカーで動画を流して他の話者役にするときはオフ。</p>
+
+  <h2>速度とメモリ</h2>
+  <div class="stats">
+    <div class="stat"><span>録音の長さ</span><b id="dur">—</b></div>
+    <div class="stat"><span>話者数</span><b id="spk">—</b></div>
+    <div class="stat"><span>発話終了 → 確定 (直近)</span><b id="lat">—</b></div>
+    <div class="stat"><span>発話終了 → 確定 (平均 / 最大)</span><b id="latAvg">—</b></div>
+    <div class="stat"><span>サーバー RSS</span><b id="rss">—</b></div>
+    <div class="stat"><span>RSS の最大 (1秒ごと)</span><b id="peak">—</b></div>
+    <div class="stat"><span>サーバー起動</span><b id="load">—</b></div>
+  </div>
+  <p class="note">「発話終了 → 確定」は、最後の単語の終わりから確定結果が届くまでの時間です。無音を待つ時間 (エンドポインティング) を含みます。</p>
+
+  <h2>直近40秒のタイムライン</h2>
+  <div class="panel" id="timeline"><p class="note">録音を開始すると表示されます。</p></div>
+
+  <h2>文字起こし</h2>
+  <div class="panel list" id="lines"><p class="note">確定した発話が新しい順に並びます。</p></div>
+
+  <h2>AI に渡すテキスト</h2>
+  <pre class="panel" id="llm" style="white-space:pre-wrap;margin:0;font-size:13px">確定した発話がここに並びます。</pre>
+</main>
+
+<script>
+const COLORS = ["#4e79a7", "#f28e2b", "#59a14f", "#e15759", "#b07aa1", "#76b7b2", "#c9a227", "#9c755f"];
+const WORKLET = `registerProcessor("tap", class extends AudioWorkletProcessor {
+  process([input]) { if (input[0]) this.port.postMessage(input[0].slice()); return true; }
+});`;
+const VIEW_SEC = 40;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+const fmt = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+const color = (s) => (s == null ? "#888" : COLORS[(s - 1) % COLORS.length]);
+const label = (s) => (s == null ? "?" : `話者 ${s}`); // the server numbers speakers from 1
+const chip = (s) => `<span class="chip" style="background:${color(s)}">${label(s)}</span>`;
+
+let running = false, ws, ctx, stream, wsUrl, sent = 0, lines = [], words = [], partial = "", lats = [];
+
+const poll = async () => {
+  const r = await (await fetch("/stats")).json();
+  wsUrl = r.wsUrl;
+  $("rss").textContent = `${r.rssMB.toFixed(0)} MB`;
+  $("peak").textContent = `${r.peakMB.toFixed(0)} MB`;
+  $("load").textContent = `${r.loadS.toFixed(1)} s`;
+};
+poll();
+setInterval(() => running && poll(), 1000);
+
+$("start").onclick = () => (running ? stop() : start());
+
+async function start() {
+  await poll();
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: $("aec").checked, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+  });
+  ctx = new AudioContext({ sampleRate: 16000 });
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
+  const tap = new AudioWorkletNode(ctx, "tap");
+  ctx.createMediaStreamSource(stream).connect(tap).connect(ctx.destination); // outputs silence
+
+  ws = new WebSocket(wsUrl);
+  await new Promise((ok, fail) => { ws.onopen = ok; ws.onerror = () => fail(new Error("WebSocket に接続できません")); });
+  ws.send(JSON.stringify({ type: "session.update", session: {
+    sample_rate: 16000, language: $("lang").value, speaker_diarization: true, word_timestamps: true, endpointing_ms: +$("ep").value,
+  } }));
+  ws.onmessage = (e) => onEvent(JSON.parse(e.data));
+  ws.onclose = () => running && stop();
+
+  sent = 0; lines = []; words = []; partial = ""; lats = [];
+  tap.port.onmessage = (e) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const f = e.data, pcm = new Int16Array(f.length);
+    for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-1, Math.min(1, f[i])) * 0x7fff;
+    ws.send(pcm.buffer);
+    sent += f.length;
+    $("dur").textContent = fmt(sent / 16000);
+  };
+  running = true;
+  $("start").textContent = "停止";
+  $("start").classList.add("on");
+  $("lang").disabled = $("ep").disabled = true;
+  render();
+}
+
+function stop() {
+  running = false;
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+  setTimeout(() => ws?.close(), 2000); // let the last utterance come back
+  stream?.getTracks().forEach((t) => t.stop());
+  ctx?.close();
+  $("start").textContent = "録音開始";
+  $("start").classList.remove("on");
+  $("lang").disabled = $("ep").disabled = false;
+}
+
+function onEvent(ev) {
+  if (ev.type === "error") return console.error(ev);
+  if (ev.type === "conversation.item.input_audio_transcription.delta") {
+    // ponytail: the server resends the whole partial when it rewrites rather than extends it, which this
+    // appends; the final line replaces the preview either way.
+    partial += ev.delta ?? "";
+    return render();
+  }
+  if (ev.type !== "conversation.item.input_audio_transcription.completed") return;
+  partial = "";
+  const ws_ = ev.words ?? [];
+  if (!ev.transcript?.trim() || !ws_.length) return render();
+  words.push(...ws_);
+  // A Japanese "word" is a whole run between punctuation, so the line takes the speaker who says
+  // most of it.
+  const talk = {};
+  for (const w of ws_) if (w.speaker) talk[w.speaker] = (talk[w.speaker] || 0) + (w.end - w.start);
+  const speaker = +(Object.entries(talk).sort((a, b) => b[1] - a[1])[0]?.[0]) || null;
+  const end = ws_.at(-1).end, lat = sent / 16000 - end;
+  lines.push({ speaker, start: ws_[0].start, end, text: ev.transcript.trim(), lat });
+  lats.push(lat);
+  $("lat").textContent = `${lat.toFixed(2)} s`;
+  $("latAvg").textContent = `${(lats.reduce((a, b) => a + b) / lats.length).toFixed(2)} / ${Math.max(...lats).toFixed(2)} s`;
+  $("spk").textContent = new Set(lines.map((l) => l.speaker).filter(Boolean)).size;
+  render();
+}
+
+function render() {
+  const now = sent / 16000, lo = Math.max(0, now - VIEW_SEC);
+  const speakers = [...new Set(words.map((w) => w.speaker ?? null))].sort((a, b) => (a ?? 99) - (b ?? 99));
+  $("timeline").innerHTML = speakers.length
+    ? speakers.map((s) => `<div class="row"><span class="lab" style="color:${color(s)}">${label(s)}</span><div class="lane">${
+        words.filter((w) => (w.speaker ?? null) === s && w.end > lo).map((w) => {
+          const a = Math.max(w.start, lo);
+          return `<i style="left:${((a - lo) / VIEW_SEC) * 100}%;width:${((w.end - a) / VIEW_SEC) * 100}%;background:${color(s)}"></i>`;
+        }).join("")}</div></div>`).join("")
+    : `<p class="note">${running ? "話してください…" : "録音を開始すると表示されます。"}</p>`;
+
+  $("lines").innerHTML = (partial ? `<p class="partial"><span class="t">認識中</span><span>${esc(partial)}</span></p>` : "") +
+    lines.slice().reverse().map((l) => `<p>${chip(l.speaker)}<span class="t">${fmt(l.start)}</span><span>${esc(l.text)}</span><span class="t">${l.lat.toFixed(2)} s</span></p>`).join("");
+  if (lines.length) $("llm").textContent = lines.map((l) => `[${label(l.speaker)} ${fmt(l.start)}] ${l.text}`).join("\n");
+}
+</script>
+</body>
+</html>
